@@ -1,11 +1,83 @@
+import * as tf from '@tensorflow/tfjs';
 import { PredictionResult, PredictionItem, PredictionStats } from '../types';
 
 class PredictionService {
   private lastFetchedPeriod: string | null = null;
   private history: PredictionItem[] = [];
   private totalPredictions: number = 0;
-  private lossStreak: number = 0;
-  private trendAnalysis: number[] = [];
+  private model: tf.LayersModel | null = null;
+  private mapping = { 'Small': 0, 'Big': 1 };
+  private reverseMapping = { 0: 'Small', 1: 'Big' };
+
+  private async buildModel() {
+    const model = tf.sequential();
+    model.add(tf.layers.lstm({
+      units: 64,
+      activation: 'relu',
+      inputShape: [5, 1]
+    }));
+    model.add(tf.layers.dense({
+      units: 1,
+      activation: 'sigmoid'
+    }));
+    
+    model.compile({
+      optimizer: 'adam',
+      loss: 'binaryCrossentropy',
+      metrics: ['accuracy']
+    });
+    
+    return model;
+  }
+
+  private async preprocessData(data: any[]): Promise<tf.Tensor[]> {
+    const numbers = data.map(item => Number(item.number));
+    const encoded = numbers.map(n => n >= 5 ? 1 : 0);
+    
+    const X = [];
+    const y = [];
+    
+    for (let i = 0; i < encoded.length - 5; i++) {
+      X.push(encoded.slice(i, i + 5));
+      y.push(encoded[i + 5]);
+    }
+    
+    return [
+      tf.tensor3d(X, [X.length, 5, 1]),
+      tf.tensor1d(y)
+    ];
+  }
+
+  private async trainModel(X: tf.Tensor, y: tf.Tensor) {
+    if (!this.model) {
+      this.model = await this.buildModel();
+    }
+    
+    await this.model.fit(X, y, {
+      epochs: 10,
+      verbose: 0
+    });
+  }
+
+  private async predictNext(data: any[]): Promise<PredictionResult> {
+    if (!this.model) {
+      const [X, y] = await this.preprocessData(data);
+      await this.trainModel(X, y);
+      X.dispose();
+      y.dispose();
+    }
+    
+    const lastFive = data.slice(0, 5).map(item => Number(item.number) >= 5 ? 1 : 0);
+    const input = tf.tensor3d([lastFive], [1, 5, 1]);
+    
+    const prediction = this.model!.predict(input) as tf.Tensor;
+    const result = await prediction.data();
+    
+    input.dispose();
+    prediction.dispose();
+    
+    return result[0] > 0.5 ? 'Big' : 'Small';
+  }
 
   async fetchResults(): Promise<PredictionResult[]> {
     try {
@@ -31,27 +103,19 @@ class PredictionService {
 
       const data = await response.json();
       if (!data?.data?.list?.length) {
-        return ['Big']; // Default prediction if no data
+        return ['Big'];
       }
 
       const latestResult = data.data.list[0];
       if (latestResult.issueNumber === this.lastFetchedPeriod) {
-        return ['Big']; // Return default if same period
+        return ['Big'];
       }
 
-      // Update last prediction result if exists
       if (this.history.length > 0 && !this.history[0].isActual) {
         const lastPrediction = this.history[0];
         const currentNumber = Number(latestResult.number);
         const currentResult: PredictionResult = currentNumber >= 5 ? 'Big' : 'Small';
-        const wasCorrect = lastPrediction.result === currentResult;
         
-        if (!wasCorrect) {
-          this.lossStreak++;
-        } else {
-          this.lossStreak = 0;
-        }
-
         const updatedPrediction: PredictionItem = {
           ...lastPrediction,
           isActual: true,
@@ -59,71 +123,37 @@ class PredictionService {
           periodNumber: currentNumber
         };
         this.history[0] = updatedPrediction;
-        
-        this.updateTrendAnalysis(currentNumber);
       }
 
       this.lastFetchedPeriod = latestResult.issueNumber;
       const nextPeriodFull = (BigInt(latestResult.issueNumber) + 1n).toString();
       
       this.totalPredictions++;
-      const newPrediction = this.generatePrediction(data.data.list);
+      const prediction = await this.predictNext(data.data.list);
       
       const predictionItem: PredictionItem = {
         id: Date.now(),
-        result: newPrediction,
+        result: prediction,
         timestamp: new Date().toISOString(),
         isActual: false,
-        periodNumber: this.generatePeriodNumber(newPrediction),
+        periodNumber: this.generatePeriodNumber(prediction),
         issueNumber: nextPeriodFull
       };
 
-      this.history.unshift(predictionItem);
-      return [newPrediction];
+      this.history = [predictionItem];
+      return [prediction];
 
     } catch (error) {
       console.error("API Error:", error);
-      return ['Big']; // Default prediction on error
+      return ['Big'];
     }
-  }
-
-  private updateTrendAnalysis(number: number) {
-    this.trendAnalysis.push(number);
-    if (this.trendAnalysis.length > 20) {
-      this.trendAnalysis.shift();
-    }
-  }
-
-  private generatePrediction(gameList: any[]): PredictionResult {
-    const numbers = gameList.slice(0, 5).map(item => Number(item.number));
-    const average = numbers.reduce((a, b) => a + b, 0) / numbers.length;
-    
-    // Calculate trend
-    const trend = numbers[0] - numbers[numbers.length - 1];
-    
-    // Calculate pattern
-    const pattern = numbers.map(n => n >= 5 ? 'Big' : 'Small');
-    const consecutiveSame = pattern.filter((val, i) => val === pattern[0]).length;
-    
-    if (consecutiveSame >= 3) {
-      // Break the pattern
-      return pattern[0] === 'Big' ? 'Small' : 'Big';
-    }
-    
-    if (Math.abs(trend) > 2) {
-      // Strong trend reversal
-      return trend > 0 ? 'Small' : 'Big';
-    }
-    
-    // Use average as baseline
-    return average >= 5 ? 'Big' : 'Small';
   }
 
   private generatePeriodNumber(result: PredictionResult): number {
     if (result === 'Big') {
-      return Math.floor(Math.random() * 5) + 5; // 5-9 for Big
+      return Math.floor(Math.random() * 5) + 5;
     } else {
-      return Math.floor(Math.random() * 5); // 0-4 for Small
+      return Math.floor(Math.random() * 5);
     }
   }
 
