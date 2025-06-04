@@ -38,7 +38,8 @@ class PredictionService {
     const y = [];
     
     for (let i = 0; i < encoded.length - 5; i++) {
-      X.push(encoded.slice(i, i + 5));
+      // Wrap each value in an array to create the feature dimension
+      X.push(encoded.slice(i, i + 5).map(val => [val]));
       y.push(encoded[i + 5]);
     }
     
@@ -68,7 +69,8 @@ class PredictionService {
     }
     
     const lastFive = data.slice(0, 5).map(item => Number(item.number) >= 5 ? 1 : 0);
-    const input = tf.tensor3d([lastFive], [1, 5, 1]);
+    // Wrap each value in an array to create the feature dimension
+    const input = tf.tensor3d([lastFive.map(val => [val])], [1, 5, 1]);
     
     const prediction = this.model!.predict(input) as tf.Tensor;
     const result = await prediction.data();
