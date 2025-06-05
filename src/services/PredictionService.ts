@@ -2,6 +2,9 @@ import * as tf from '@tensorflow/tfjs';
 import { PredictionResult, PredictionItem, PredictionStats } from '../types';
 
 class PredictionService {
+  private lastFetchedPeriod: string | null = null;
+  private history: PredictionItem[] = [];
+  private totalPredictions: number = 0;
   private model: tf.LayersModel | null = null;
   private mapping = { 'Small': 0, 'Big': 1 };
   private reverseMapping = { 0: 'Small', 1: 'Big' };
@@ -28,18 +31,19 @@ class PredictionService {
   }
 
   private async preprocessData(data: any[]): Promise<tf.Tensor[]> {
-    const numbers = data.map(item => item.BigSmall === 'Big' ? 1 : 0);
+    const numbers = data.map(item => Number(item.number));
+    const encoded = numbers.map(n => n >= 5 ? 1 : 0);
     
     const X = [];
     const y = [];
     
-    for (let i = 0; i < numbers.length - 5; i++) {
-      X.push(numbers.slice(i, i + 5));
-      y.push(numbers[i + 5]);
+    for (let i = 0; i < encoded.length - 5; i++) {
+      X.push(encoded.slice(i, i + 5));
+      y.push(encoded[i + 5]);
     }
     
     return [
-      tf.tensor3d(X.map(seq => seq.map(n => [n])), [X.length, 5, 1]),
+      tf.tensor3d(X, [X.length, 5, 1]),
       tf.tensor1d(y)
     ];
   }
@@ -63,8 +67,8 @@ class PredictionService {
       y.dispose();
     }
     
-    const lastFive = data.slice(-5).map(item => item.BigSmall === 'Big' ? 1 : 0);
-    const input = tf.tensor3d([lastFive.map(val => [val])], [1, 5, 1]);
+    const lastFive = data.slice(0, 5).map(item => Number(item.number) >= 5 ? 1 : 0);
+    const input = tf.tensor3d([lastFive], [1, 5, 1]);
     
     const prediction = this.model!.predict(input) as tf.Tensor;
     const result = await prediction.data();
@@ -102,7 +106,41 @@ class PredictionService {
         return ['Big'];
       }
 
+      const latestResult = data.data.list[0];
+      if (latestResult.issueNumber === this.lastFetchedPeriod) {
+        return ['Big'];
+      }
+
+      if (this.history.length > 0 && !this.history[0].isActual) {
+        const lastPrediction = this.history[0];
+        const currentNumber = Number(latestResult.number);
+        const currentResult: PredictionResult = currentNumber >= 5 ? 'Big' : 'Small';
+        
+        const updatedPrediction: PredictionItem = {
+          ...lastPrediction,
+          isActual: true,
+          result: currentResult,
+          periodNumber: currentNumber
+        };
+        this.history[0] = updatedPrediction;
+      }
+
+      this.lastFetchedPeriod = latestResult.issueNumber;
+      const nextPeriodFull = (BigInt(latestResult.issueNumber) + 1n).toString();
+      
+      this.totalPredictions++;
       const prediction = await this.predictNext(data.data.list);
+      
+      const predictionItem: PredictionItem = {
+        id: Date.now(),
+        result: prediction,
+        timestamp: new Date().toISOString(),
+        isActual: false,
+        periodNumber: this.generatePeriodNumber(prediction),
+        issueNumber: nextPeriodFull
+      };
+
+      this.history = [predictionItem];
       return [prediction];
 
     } catch (error) {
@@ -111,14 +149,32 @@ class PredictionService {
     }
   }
 
+  private generatePeriodNumber(result: PredictionResult): number {
+    if (result === 'Big') {
+      return Math.floor(Math.random() * 5) + 5;
+    } else {
+      return Math.floor(Math.random() * 5);
+    }
+  }
+
   calculateStats(history: PredictionItem[]): PredictionStats {
-    const total = history.length;
-    const bigCount = history.filter(item => item.result === 'Big').length;
-    const smallCount = history.filter(item => item.result === 'Small').length;
-    const correct = history.filter(item => item.isActual && item.result === (item.periodNumber >= 5 ? 'Big' : 'Small')).length;
+    const predictions = history.filter(item => !item.isActual);
+    const actuals = history.filter(item => item.isActual);
+
+    let correct = 0;
+    let total = actuals.length;
+
+    for (let i = 0; i < actuals.length; i++) {
+      if (actuals[i].result === predictions[i]?.result) {
+        correct++;
+      }
+    }
+
+    const bigCount = predictions.filter(item => item.result === 'Big').length;
+    const smallCount = predictions.filter(item => item.result === 'Small').length;
 
     return {
-      total,
+      total: this.totalPredictions,
       correct,
       accuracy: total > 0 ? (correct / total) * 100 : 0,
       bigCount,
@@ -127,7 +183,7 @@ class PredictionService {
       bigWins: 0,
       smallWins: 0,
       totalWins: 0,
-      distribution: Math.floor(Math.random() * 10),
+      distribution: this.generatePeriodNumber(predictions[0]?.result || 'Big'),
       confidence: 75
     };
   }
