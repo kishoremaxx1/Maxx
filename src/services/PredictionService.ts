@@ -2,7 +2,6 @@ import * as tf from '@tensorflow/tfjs';
 import { PredictionResult, PredictionItem, PredictionStats } from '../types';
 
 class PredictionService {
-  private lastFetchedPeriod: string | null = null;
   private model: tf.LayersModel | null = null;
   private mapping = { 'Small': 0, 'Big': 1 };
   private reverseMapping = { 0: 'Small', 1: 'Big' };
@@ -29,19 +28,18 @@ class PredictionService {
   }
 
   private async preprocessData(data: any[]): Promise<tf.Tensor[]> {
-    const numbers = data.map(item => Number(item.number));
-    const encoded = numbers.map(n => n >= 5 ? 1 : 0);
+    const numbers = data.map(item => item.BigSmall === 'Big' ? 1 : 0);
     
     const X = [];
     const y = [];
     
-    for (let i = 0; i < encoded.length - 5; i++) {
-      X.push(encoded.slice(i, i + 5).map(val => [val]));
-      y.push(encoded[i + 5]);
+    for (let i = 0; i < numbers.length - 5; i++) {
+      X.push(numbers.slice(i, i + 5));
+      y.push(numbers[i + 5]);
     }
     
     return [
-      tf.tensor3d(X, [X.length, 5, 1]),
+      tf.tensor3d(X.map(seq => seq.map(n => [n])), [X.length, 5, 1]),
       tf.tensor1d(y)
     ];
   }
@@ -65,7 +63,7 @@ class PredictionService {
       y.dispose();
     }
     
-    const lastFive = data.slice(-5).map(item => Number(item.number) >= 5 ? 1 : 0);
+    const lastFive = data.slice(-5).map(item => item.BigSmall === 'Big' ? 1 : 0);
     const input = tf.tensor3d([lastFive.map(val => [val])], [1, 5, 1]);
     
     const prediction = this.model!.predict(input) as tf.Tensor;
